@@ -20,8 +20,12 @@
 
 ## Data state (`apix` DB)
 - 6 routes seeded; 45-day backfill: 14,850 raw → 14,549 fares → 44 index days
-  (2026-08-13 … 2026-09-26, base 2026-08-13, 97.12 → 107.16).
-- 3 genuine live EaseMyTrip quotes in `raw_fare_quotes` (`live=true`).
+  (2026-08-14 … 2026-09-27, base 2026-08-14). Re-run `python db/backfill.py --days 45`
+  after truncating.
+- 330 mock quotes from `python -m scraper.scheduler --once` (2026-09-27).
+- DGCA benchmark: NOT yet loaded — download the published monthly average-fare
+  series into `dgca_data/dgca_monthly_avg_fare.csv` (see `dgca_data/README.md`),
+  then `python -m dgca.backtest` writes the real comparison to `backtest_report.md`.
 - `proxies` table populated on demand (`python -m scraper.proxies`); empty by default.
 - Test DB `test_apix` exists (conftest recreates it per session).
 
@@ -40,6 +44,9 @@
 ## Suggested next steps
 1. Residential proxies or NDC/affiliate APIs to lift live coverage past 1/11.
 2. EMT-style form flows for IndiGo/SpiceJet (parked probes documented in chat).
-3. Replace synthetic DGCA proxy in `backtest_report.md` with published figures.
+3. **Download the real DGCA monthly average-fare series** into
+   `dgca_data/dgca_monthly_avg_fare.csv` (schema in `dgca_data/README.md`) and
+   run `python -m dgca.backtest` — the backtest currently reports 0 overlap
+   honestly rather than quoting the old synthetic r ≈ 0.93.
 4. Exact DGCA traffic shares into `routes.weight` before official use.
 5. `git init` was re-run (original `.git/` vanished); nothing committed yet.

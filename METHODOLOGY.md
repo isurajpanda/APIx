@@ -34,3 +34,26 @@ compatibility with CPI compilation practice.
 ## Elasticity
 Per-route mean fare by advance-purchase window (T+1..T+45); descriptive curve
 only, not a causal estimate.
+
+## Problem-statement mapping (MoSPI PS 26056)
+- "index-construction module based on PSD given routes and weights" — the
+  Laspeyres-style weighted price-relative formula above, parameterised by the
+  6-route DGCA-traffic basket and weights in `scraper/routes.yaml`.
+- "JS-rendered pages, CAPTCHAs, anti-bot, IP rotation, session management" —
+  Playwright headless Chromium with stealth patches (`scraper/live.py`), a
+  per-host robots gate, politeness delays, and a free-proxy failover pool
+  (`scraper/proxies.py`). Each run uses a fresh isolated browser context
+  (cookie jar + storage state per scrape) — sessions are deliberately
+  short-lived so no cross-source session leakage; form flows persist only
+  within a single search.
+- "removes outliers, handles missing values, cancellations/sold-out, separates
+  base fare from taxes, UDF and convenience charges" — `pipeline/clean.py`
+  (3-SD outlier rule, no_data marking, availability split, fare decomposition).
+- "at least 30 days of back-tested results against publicly available DGCA
+  monthly average-fare data" — `dgca/backtest.py` compares the APIx monthly
+  index against the published DGCA series (`dgca_data/dgca_monthly_avg_fare.csv`)
+  and writes `backtest_report.md`; it refuses to quote a correlation until
+  the real benchmark file is supplied.
+- "fare-class" — all live scrapers target Economy cabin (the CPI-relevant
+  class); the `fares` table carries a `fare_class` column for future
+  multi-class extension.

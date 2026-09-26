@@ -214,9 +214,9 @@ export default function App() {
           <CardHeader className="flex-row items-center justify-between">
             <div>
               <CardTitle>Back-test — daily index vs 7-day trend</CardTitle>
-              <p className="mt-1 text-xs text-muted">45 days of pipeline data · DGCA overlay in <span className="font-mono">backtest_report.md</span></p>
+              <p className="mt-1 text-xs text-muted">45 days of pipeline data · DGCA benchmark status in <span className="font-mono">backtest_report.md</span></p>
             </div>
-            <Badge tone="blue">r ≈ 0.93 vs DGCA proxy</Badge>
+            <Badge tone="blue">APIx internal back-test</Badge>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={260}>
