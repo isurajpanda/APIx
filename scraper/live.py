@@ -29,6 +29,31 @@ BLOCK_MARKERS = ("captcha", "are you a robot", "access denied", "request blocked
                  "perimeterx", "akamai", "datadome", "please verify")
 EMPTY_MARKERS = ("no flights found", "no flights available", "sold out", "no results found")
 
+# Applied to every live browser context: strips the most common headless tells.
+# Won't beat Akamai/PerimeterX alone, but lifts success on mid-tier defenses.
+STEALTH_JS = """() => {
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  window.chrome = window.chrome || { runtime: {} };
+  const origQuery = window.navigator.permissions.query;
+  window.navigator.permissions.query = (p) => (
+    p.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : origQuery(p)
+  );
+}"""
+
+
+def new_stealth_context(browser, user_agent: str):
+    """Create a browser context with stealth patches + realistic viewport/locale."""
+    ctx = browser.new_context(
+        user_agent=user_agent, locale="en-IN", timezone_id="Asia/Kolkata",
+        viewport={"width": 1366, "height": 768},
+    )
+    ctx.add_init_script(STEALTH_JS)
+    return ctx
+
 
 def parse_fares(page_text: str) -> list[float]:
     """Extract all ₹ amounts from page text; cheapest first."""
@@ -84,7 +109,7 @@ def fetch_search_result(source: str, url: str, selectors: list[str],
             launch_kw["proxy"] = proxy
         browser = p.chromium.launch(**launch_kw)
         try:
-            ctx = browser.new_context(user_agent=user_agent)
+            ctx = new_stealth_context(browser, user_agent)
             page = ctx.new_page()
             resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             if resp and resp.status in (403, 429):

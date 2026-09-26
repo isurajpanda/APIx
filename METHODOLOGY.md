@@ -21,7 +21,9 @@ First 7 days of collection, normalized to 100. Fixed thereafter; any
 re-basing is recorded via `methodology_version` (old rows never overwritten).
 
 ## Granularities
-Daily (native), weekly = 7-day rolling mean, monthly = 30-day rolling mean.
+Daily (native, stored in `daily_index`), weekly = 7-day rolling mean,
+monthly = 30-day rolling mean — both derived at query time from daily rows
+(`index/compute.py: rolling_average`, applied in `backend/main.py`).
 
 ## Relation to theory
 Pure Laspeyres with fixed base-period weights (CPI-consistent). A Fisher

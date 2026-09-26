@@ -9,6 +9,13 @@
 - ToS: airline/OTA ToS typically restrict automated collection; this
   prototype defaults to `APIX_SCRAPER_MOCK=true` (synthetic quotes, no live
   hits). Enable live scraping only with legal clearance, and throttle further.
+  Currently live: EaseMyTrip only (form-driven flow, `scraper/emt.py`);
+  per-platform audit status in `LIVE_STATUS.md`.
+- Stealth: live fetches use stock Chrome UA, webdriver/plugins/languages
+  shims, en-IN locale, HTTP/1.1 fallback (`scraper/live.py`). This is
+  fingerprint minimization, not circumvention.
+- No CAPTCHA solving: sources gating on reCAPTCHA (Ixigo, Air India Express)
+  are parked, never bypassed. CAPTCHA → status `captcha_blocked`.
 - Kill-switch: set any source to `false` under `enabled_sources` in
   `scraper/routes.yaml` to disable it instantly.
 - CAPTCHA → status `captcha_blocked`, skip without retry-storm; sold-out →

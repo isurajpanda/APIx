@@ -53,7 +53,8 @@ def search_easymytrip(origin: str, destination: str, flight_date: date,
             kw["proxy"] = proxy
         browser = p.chromium.launch(**kw)
         try:
-            pg = browser.new_context(user_agent=REAL_CHROME_UA).new_page()
+            from scraper.live import new_stealth_context
+            pg = new_stealth_context(browser, REAL_CHROME_UA).new_page()
             resp = pg.goto("https://www.easemytrip.com/", wait_until="domcontentloaded",
                            timeout=timeout_ms)
             if resp and 400 <= resp.status < 500:

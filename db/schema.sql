@@ -1,5 +1,15 @@
--- APIx schema (PostgreSQL 15+ + TimescaleDB)
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- APIx schema (PostgreSQL 15+; TimescaleDB optional but recommended).
+-- On hosts without TimescaleDB (e.g. native Windows, where no official build
+-- ships), everything below still applies cleanly on plain PostgreSQL: the app
+-- only queries plain tables, hypertables/continuous aggregates are a speedup.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb') THEN
+        CREATE EXTENSION IF NOT EXISTS timescaledb;
+    ELSE
+        RAISE NOTICE 'timescaledb not available - continuing on plain PostgreSQL';
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS fares (
     id                          BIGSERIAL,
@@ -22,7 +32,12 @@ CREATE TABLE IF NOT EXISTS fares (
     created_at                  TIMESTAMPTZ DEFAULT now()
 );
 
-SELECT create_hypertable('fares', 'scrape_timestamp');
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('fares', 'scrape_timestamp');
+    END IF;
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_fare_key ON fares
     (origin, destination, carrier, flight_date, advance_purchase_window, source, scrape_timestamp);
@@ -68,27 +83,32 @@ CREATE TABLE IF NOT EXISTS proxies (
 
 CREATE INDEX IF NOT EXISTS idx_proxies_working_latency ON proxies (working, latency_ms);
 
--- Continuous aggregates: daily/weekly/monthly avg fare per route
-CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_daily
-WITH (timescaledb.continuous) AS
-SELECT time_bucket('1 day', scrape_timestamp) AS bucket, origin, destination,
-       AVG(total_fare) AS avg_fare, COUNT(*) AS n
-FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
-GROUP BY bucket, origin, destination
-WITH NO DATA;
+-- Continuous aggregates (TimescaleDB only; skipped on plain PostgreSQL)
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_daily
+        WITH (timescaledb.continuous) AS
+        SELECT time_bucket('1 day', scrape_timestamp) AS bucket, origin, destination,
+               AVG(total_fare) AS avg_fare, COUNT(*) AS n
+        FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
+        GROUP BY bucket, origin, destination
+        WITH NO DATA;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_weekly
-WITH (timescaledb.continuous) AS
-SELECT time_bucket('7 days', scrape_timestamp) AS bucket, origin, destination,
-       AVG(total_fare) AS avg_fare, COUNT(*) AS n
-FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
-GROUP BY bucket, origin, destination
-WITH NO DATA;
+        CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_weekly
+        WITH (timescaledb.continuous) AS
+        SELECT time_bucket('7 days', scrape_timestamp) AS bucket, origin, destination,
+               AVG(total_fare) AS avg_fare, COUNT(*) AS n
+        FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
+        GROUP BY bucket, origin, destination
+        WITH NO DATA;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_monthly
-WITH (timescaledb.continuous) AS
-SELECT time_bucket('30 days', scrape_timestamp) AS bucket, origin, destination,
-       AVG(total_fare) AS avg_fare, COUNT(*) AS n
-FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
-GROUP BY bucket, origin, destination
-WITH NO DATA;
+        CREATE MATERIALIZED VIEW IF NOT EXISTS avg_fare_monthly
+        WITH (timescaledb.continuous) AS
+        SELECT time_bucket('30 days', scrape_timestamp) AS bucket, origin, destination,
+               AVG(total_fare) AS avg_fare, COUNT(*) AS n
+        FROM fares WHERE availability_status = 'available' AND is_outlier = FALSE
+        GROUP BY bucket, origin, destination
+        WITH NO DATA;
+    END IF;
+END $$;
