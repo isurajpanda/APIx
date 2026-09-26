@@ -1,0 +1,26 @@
+# Core
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+sqlalchemy==2.0.*
+psycopg[binary]==3.1.*
+alembic==1.13.*
+pydantic==2.7.*
+pydantic-settings==2.3.*
+python-dateutil==2.9.*
+pyyaml==6.0.*
+numpy==1.26.*
+pandas==2.2.*
+
+# Scraping
+scrapy==2.11.*
+playwright==1.44.*
+apscheduler==3.10.*
+robotexclusionrulesparser==1.7.*
+
+# Caching (Memcached — no Redis)
+pymemcache==4.0.*
+
+# Testing
+pytest==8.2.*
+pytest-asyncio==0.23.*
+httpx==0.27.*

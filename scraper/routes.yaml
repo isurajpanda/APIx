@@ -1,0 +1,45 @@
+"""Route basket: representative city-pairs. Weights = DGCA pax-traffic share (see METHODOLOGY.md)."""
+routes:
+  - origin: DEL
+    destination: BOM
+    weight: 0.2200
+  - origin: DEL
+    destination: BLR
+    weight: 0.2000
+  - origin: BOM
+    destination: BLR
+    weight: 0.1700
+  - origin: DEL
+    destination: CCU
+    weight: 0.1500
+  - origin: BLR
+    destination: HYD
+    weight: 0.1200
+  - origin: MAA
+    destination: DEL
+    weight: 0.1400
+
+advance_windows: [1, 7, 15, 30, 45]
+
+sources:
+  airlines: [indigo_direct, airindia_direct, airindia_express, akasa_direct, spicejet_direct]
+  otas: [makemytrip, yatra, easemytrip, cleartrip, ixigo, goibibo]
+
+# Kill-switch: set any source to false to disable instantly without code changes.
+enabled_sources:
+  indigo_direct: true
+  airindia_direct: true
+  airindia_express: true
+  akasa_direct: true
+  spicejet_direct: true
+  makemytrip: true
+  yatra: true
+  easemytrip: true
+  cleartrip: true
+  ixigo: true
+  goibibo: true
+
+politeness:
+  delay_seconds: 2.0
+  concurrent_per_domain: 1
+  respect_robots_txt: true

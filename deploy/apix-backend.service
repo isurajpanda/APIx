@@ -1,0 +1,12 @@
+[Unit]
+Description=APIx FastAPI backend
+After=network.target postgresql.service memcached.service
+[Service]
+User=apix
+WorkingDirectory=/opt/apix
+Environment=DATABASE_URL=postgresql+psycopg://apix:secret@localhost:5432/apix
+Environment=APIX_API_KEY=change-me
+ExecStart=/opt/apix/venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8000
+Restart=always
+[Install]
+WantedBy=multi-user.target

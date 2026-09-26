@@ -1,0 +1,2 @@
+# Fallback if APScheduler process is down: trigger one cycle daily at 02:30.
+30 2 * * * apix /opt/apix/venv/bin/python -m scraper.scheduler --once >> /var/log/apix-cron.log 2>&1
