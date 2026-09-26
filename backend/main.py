@@ -132,8 +132,16 @@ def get_index_series(granularity: str, start: str | None, end: str | None) -> li
             {"s": start, "e": end},
         )
         if rows:
-            vals = [{**r, "index_date": str(r["index_date"]), "base_period": str(r["base_period"]),
-                     "index_value": float(r["index_value"])} for r in rows]
+            from index.compute import rolling_average
+            daily = {str(r["index_date"]): float(r["index_value"]) for r in rows}
+            meta = {str(r["index_date"]): (r["methodology_version"], str(r["base_period"])) for r in rows}
+            if granularity == "weekly":
+                daily = rolling_average(daily, 7)
+            elif granularity == "monthly":
+                daily = rolling_average(daily, 30)
+            vals = [{"index_date": d, "index_value": round(v, 2),
+                     "methodology_version": meta[d][0], "base_period": meta[d][1]}
+                    for d, v in daily.items() if v is not None]
             cache_set(key, vals)
             return vals
     except Exception:
@@ -189,12 +197,35 @@ def heatmap():
     key = "heatmap"
     hit = cache_get(key)
     if hit is not None:
-        return {"heatmap": hit}
+        return {"heatmap": hit, "source": "db"}
+    try:
+        rows = _db_rows(
+            """WITH latest AS (SELECT MAX(scrape_timestamp)::date AS d FROM fares),
+            base AS (SELECT origin, destination, AVG(total_fare) AS base_fare
+                     FROM fares WHERE scrape_timestamp::date IN
+                        (SELECT DISTINCT scrape_timestamp::date FROM fares ORDER BY 1 LIMIT 7)
+                     AND availability_status='available' AND NOT is_outlier
+                     GROUP BY 1, 2)
+            SELECT f.origin, f.destination, AVG(f.total_fare) AS avg_fare,
+                   MAX(b.base_fare) AS base_fare
+            FROM fares f JOIN latest ON f.scrape_timestamp::date = latest.d
+            LEFT JOIN base b ON b.origin=f.origin AND b.destination=f.destination
+            WHERE f.availability_status='available' AND NOT f.is_outlier
+            GROUP BY 1, 2 ORDER BY 1, 2""", {})
+        if rows:
+            cells = [{"origin": r["origin"], "destination": r["destination"],
+                      "avg_fare": round(float(r["avg_fare"]), 2),
+                      "relative": round(float(r["avg_fare"]) / float(r["base_fare"]), 4)
+                      if r["base_fare"] else 1.0} for r in rows]
+            cache_set(key, cells)
+            return {"heatmap": cells, "source": "db"}
+    except Exception:
+        pass
     cells = [{"origin": r["origin"], "destination": r["destination"],
               "avg_fare": BASE_FARE[f"{r['origin']}-{r['destination']}"],
               "relative": 1.0} for r in ROUTES]
     cache_set(key, cells)
-    return {"heatmap": cells}
+    return {"heatmap": cells, "source": "demo"}
 
 
 @app.get("/api/v1/fares/elasticity/{route_id}", dependencies=[Depends(require_key)])
@@ -202,10 +233,24 @@ def elasticity(route_id: int):
     route = next((r for r in ROUTES if r["route_id"] == route_id), None)
     if route is None:
         raise HTTPException(404, "unknown route")
+    try:
+        rows = _db_rows(
+            """SELECT advance_purchase_window AS window, AVG(total_fare) AS avg_fare
+            FROM fares WHERE origin=:o AND destination=:d
+            AND availability_status='available' AND NOT is_outlier
+            AND scrape_timestamp >= now() - INTERVAL '30 days'
+            GROUP BY 1 ORDER BY 1""",
+            {"o": route["origin"], "d": route["destination"]})
+        if rows:
+            return {"route_id": route_id, "source": "db",
+                    "curve": [{"window": int(r["window"]), "avg_fare": round(float(r["avg_fare"]), 2)}
+                              for r in rows]}
+    except Exception:
+        pass
     base = BASE_FARE[f"{route['origin']}-{route['destination']}"]
     curve = [{"window": w, "avg_fare": round(base * m, 2)}
              for w, m in [(1, 1.45), (7, 1.25), (15, 1.10), (30, 1.0), (45, 0.92)]]
-    return {"route_id": route_id, "curve": curve}
+    return {"route_id": route_id, "curve": curve, "source": "demo"}
 
 
 # --- dashboard (React build) served at / so one server handles UI + API ---
