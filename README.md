@@ -4,7 +4,8 @@ End-to-end system tracking Indian domestic airfares and computing a daily
 Laspeyres-style price index that could augment CPI. Docs: `METHODOLOGY.md`
 (index theory), `SCRAPING_ETHICS.md` (scraping rules), `backtest_report.md`
 (validation), `API.md` (endpoints), `LIVE_STATUS.md` (per-platform audit),
-`WINDOWS.md` (Windows setup), `HANDOFF.md` (operator handoff).
+`SCRAPE_CHECKLIST.md` (working-site checklist), `WINDOWS.md` (Windows setup),
+`HANDOFF.md` (operator handoff).
 
 ## Architecture
 
@@ -17,6 +18,27 @@ fares --> [index/compute.py] --> daily_index --> [FastAPI + Memcached] --> [Reac
 
 Live status: EaseMyTrip genuinely live (form-driven); 1/11 platforms from a
 datacenter IP — see `LIVE_STATUS.md`. DB holds a 45-day backfill + 3 live quotes.
+
+## Scrape checklist — working sites right now
+
+Full live audit 2026-10-04, DEL-BOM T+7, 11/11 sources (full table + operator
+boxes in `SCRAPE_CHECKLIST.md` — score: 4 SUCCESS, 2 content-blocked, 5 parked,
+0 crashes):
+
+- [x] **EaseMyTrip** — WORKING (guarded vs fee-text; genuine fares in DB)
+- [x] **Akasa Air** — WORKING (Rs 3,500, confirmed twice)
+- [x] **SpiceJet** — WORKING (Rs 3,000, 15 fares)
+- [x] **Cleartrip** — PROVISIONAL (Rs 3,500, n=3 — needs one confirmation run)
+- [ ] **Air India** — blocked: form submits (OneTrust/combobox fixes), results carry no priced fares → official API needed
+- [ ] **IndiGo** — blocked: flaky bot-gating (renders on stock Chromium, not real Chrome) → NDC/API recommended
+- [ ] **Yatra** — PARKED (Diya-AI redesign; XHR challenged, never fetched) → needs `YATRA_API_KEY`
+- [ ] **Ixigo** — PARKED (robots `/search/result/` + reCAPTCHA, no backdoor) → needs `IXIGO_API_KEY`
+- [ ] **Goibibo** — PARKED (search path disallowed) → needs `GOIBIBO_API_KEY`
+- [ ] **MakeMyTrip** — PARKED (TLS-resets automation) → needs `MMT_API_KEY`
+- [ ] **Air India Express** — PARKED (reCAPTCHA Enterprise) → needs `AIX_API_KEY`, never solve CAPTCHA
+
+Verify with: `APIX_SCRAPER_MOCK=false python -m scraper.audit DEL BOM --window 7`
+(no global channel env — Air India self-selects real Chrome)
 
 ## Native setup (no Docker, Ubuntu)
 
@@ -43,7 +65,7 @@ python -m scraper.scheduler          # daily scrape + 3-hourly proxy refresh
 python -m scraper.audit DEL BOM --window 7 [--with-proxies]  # live audit
 cd dashboard && npm install && npm run build   # rebuild after frontend changes
 
-# 5. Tests (22 passing)
+# 5. Tests (42 passing)
 pytest -q
 ```
 

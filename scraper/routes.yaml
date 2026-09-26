@@ -1,4 +1,4 @@
-"""Route basket: representative city-pairs. Weights = DGCA pax-traffic share (see METHODOLOGY.md)."""
+# Route basket: representative city-pairs. Weights = DGCA pax-traffic share (see METHODOLOGY.md).
 routes:
   - origin: DEL
     destination: BOM
@@ -26,6 +26,16 @@ sources:
   otas: [makemytrip, yatra, easemytrip, cleartrip, ixigo, goibibo]
 
 # Kill-switch: set any source to false to disable instantly without code changes.
+# Compliance notes (see scraper/form_flows.py + SCRAPING_ETHICS.md):
+# - ixigo: scraping PARKED (robots disallows /search/result/, reCAPTCHA gate);
+#   live data only via official API hook scraper/ixigo_api.py (IXIGO_API_KEY).
+# - makemytrip/goibibo/airindia_express: scraping PARKED (bot-wall / challenge /
+#   CAPTCHA); live data only via scraper/provider_apis.py (MMT_*/GOIBIBO_*/AIX_*).
+# - cleartrip: only /flights/results is allowed; never scrape /flights/search*.
+# - yatra: homepage form only (scraper/forms/yatra.py); never hit the
+#   PerimeterX-challenged XHR trigger directly.
+# - spicejet/akasa/indigo/airindia: homepage-form flows in scraper/forms/
+#   (form-first, one deep-link fallback on SelectorNotFound).
 enabled_sources:
   indigo_direct: true
   airindia_direct: true

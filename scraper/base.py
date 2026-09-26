@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import time
 import urllib.robotparser as robotparser
@@ -14,9 +15,12 @@ from typing import Any, Protocol
 log = logging.getLogger(__name__)
 
 USER_AGENTS = [
-    "Mozilla/5.0 (X11; Linux x86_64) APIx-MoSPI-Research/1.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 APIx/1.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) APIx-Research-Bot/1.0 (+https://mospi.gov.in)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ]
 
 STATUSES = ("success", "failed", "sold_out", "captcha_blocked")
@@ -58,23 +62,160 @@ class ScraperConfig:
     enabled_sources: dict[str, bool] = field(default_factory=dict)
 
 
-def robots_allowed(domain_url: str, user_agent: str = "*", timeout: float = 5.0) -> bool:
-    """Check robots.txt before scraping a domain. Returns True if allowed/unreachable."""
+_ROBOTS_CACHE: dict[str, tuple[float, list[str] | None]] = {}
+ROBOTS_CACHE_TTL = 6 * 3600.0
+_ROBOTS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".robots_cache.json")
+
+
+def _robots_cache_load() -> None:
+    """Load the on-disk robots.txt body cache into memory (TTL-filtered)."""
+    try:
+        with open(_ROBOTS_CACHE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        now = time.monotonic()
+        _ROBOTS_CACHE.update(
+            {k: (v[0], v[1]) for k, v in data.items()
+             if isinstance(v, list) and len(v) == 2 and now - v[0] < ROBOTS_CACHE_TTL}
+        )
+    except Exception:
+        pass
+
+
+def _robots_cache_save() -> None:
+    try:
+        with open(_ROBOTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({k: [v[0], v[1]] for k, v in _ROBOTS_CACHE.items()}, f)
+    except Exception:
+        pass
+
+
+def _fetch_robots_body(base: str, timeout: float) -> tuple[list[str] | None, bool]:
+    """Fetch a host's robots.txt with a browser UA, cached per host for 6h.
+
+    Returns ``(body, from_cache)``: body is the robots.txt lines, or ``None``
+    when the fetch failed. A full scrape cycle issues hundreds of runs but only
+    a handful of unique hosts — without this cache every run re-downloads
+    robots.txt (up to a 10s timeout each for walled hosts), which is both slow
+    and needlessly impolite. The cache is persisted to ``.robots_cache.json``
+    so restarts don't re-pay the cost either. Failures are cached as ``None``
+    so a known-dead host never triggers a repeat network fetch.
+    """
+    from urllib.request import Request, urlopen
+
+    _robots_cache_load()
+    now = time.monotonic()
+    hit = _ROBOTS_CACHE.get(base)
+    if hit and now - hit[0] < ROBOTS_CACHE_TTL:
+        return hit[1], True
+    body: list[str] | None = None
+    try:
+        # Fetch with a stock browser UA: bot-walled hosts (e.g. Ixigo)
+        # 403 Python-urllib, which RobotFileParser would treat as
+        # disallow-all. A real UA gets the real robots.txt.
+        req = Request(f"{base}/robots.txt", headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0.0.0 Safari/537.36",
+        })
+        with urlopen(req, timeout=timeout) as r:
+            body = r.read(100000).decode("utf-8", errors="ignore").splitlines()
+    except Exception:
+        body = None
+    _ROBOTS_CACHE[base] = (now, body)
+    _robots_cache_save()
+    return body, False
+
+
+def robots_allowed(page_url: str, user_agent: str = "*", timeout: float = 3.0) -> bool:
+    """Check robots.txt for the exact page URL (path-aware, not domain-root only).
+
+    Returns True if allowed/unreachable. A robots.txt that disallows the search
+    path (e.g. Ixigo ``/search/result/``) correctly returns False even when the
+    homepage itself is allowed.
+    """
     import socket
+    from urllib.parse import urlparse
 
     prev = socket.getdefaulttimeout()
     socket.setdefaulttimeout(timeout)
     try:
+        parsed = urlparse(page_url)
+        base = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else page_url.rstrip("/")
         rp = robotparser.RobotFileParser()
-        base = domain_url.rstrip("/")
         rp.set_url(f"{base}/robots.txt")
-        rp.read()
-        return rp.can_fetch(user_agent, base + "/")
+        body, from_cache = _fetch_robots_body(base, timeout)
+        if body:
+            try:
+                rp.parse(body)
+            except Exception:
+                rp.read()  # fallback to default fetch
+        elif body is None and not from_cache:
+            # Fresh fetch failure — one fallback attempt with the default UA.
+            # A cached failure (None from cache) skips this entirely.
+            try:
+                rp.read()
+            except Exception:
+                rp.parse([])  # both fetches failed: empty rules = allow (fail open)
+        else:
+            # Cached failure or empty body: no rules = allow all (fail open).
+            # parse([]) matters — a completely unparsed parser answers
+            # can_fetch() = False (disallow-all), which would wrongly park
+            # every walled host. Never hit the network on this path.
+            rp.parse([])
+        try:
+            if not rp.can_fetch(user_agent, page_url):
+                return False
+        except Exception:
+            pass
+        # Safety net: stdlib RobotFileParser mishandles some real-world files
+        # (e.g. Ixigo's `Disallow: *-lp-*` lines drop the `*` group, leaving
+        # default_entry None and can_fetch() True for everything). Do a minimal
+        # manual prefix check of the `User-agent: *` group so a disallowed
+        # search path can never slip through.
+        if body and _manual_star_disallowed(body, urlparse(page_url).path or "/"):
+            return False
+        return True
     except Exception as exc:  # network failure -> allow but log
-        log.warning("robots.txt check failed for %s: %s (defaulting to allowed)", domain_url, exc)
+        log.warning("robots.txt check failed for %s: %s (defaulting to allowed)", page_url, exc)
         return True
     finally:
         socket.setdefaulttimeout(prev)
+
+
+def _manual_star_disallowed(robots_lines: list[str], path: str) -> bool:
+    """Minimal `User-agent: *` Disallow prefix check (stdlib-parser safety net).
+
+    Handles plain prefixes (``/search/result/``), trailing-``*`` prefixes and
+    ``$`` end-anchors; ignores non-prefix wildcard lines (``*-lp-*``) which
+    only apply to URL patterns, not to the path being tested here.
+    """
+    import fnmatch
+
+    in_star = False
+    for raw in robots_lines:
+        line = raw.split("#", 1)[0].strip()
+        if not line or ":" not in line:
+            if not line:
+                continue
+            continue
+        key, _, val = line.partition(":")
+        key, val = key.strip().lower(), val.strip()
+        if key == "user-agent":
+            in_star = val == "*"
+        elif key == "disallow" and in_star and val:
+            if not val.startswith("/"):
+                continue  # pattern fragment (e.g. *-lp-*), not a path prefix
+            if val.endswith("$"):
+                if path == val[:-1] or path.rstrip("/") == val[:-1].rstrip("/"):
+                    return True
+            elif val.endswith("*"):
+                if path.startswith(val[:-1]):
+                    return True
+            else:
+                if path.startswith(val):
+                    return True
+    _ = fnmatch  # reserved for full wildcard support if needed later
+    return False
 
 
 class BaseScraper(ABC):
@@ -111,14 +252,20 @@ class BaseScraper(ABC):
     def polite_wait(self) -> None:
         time.sleep(self.config.delay_seconds)
 
-    def check_robots(self) -> bool:
-        """Return False (and log) if robots.txt disallows this source."""
-        if not self.config.respect_robots_txt or not self.start_url:
+    def robots_target(self, *args, **kwargs) -> str:
+        """Exact URL the run will fetch (path-aware robots check). Overridden below."""
+        return self.start_url
+
+    def check_robots(self, target_url: str | None = None) -> bool:
+        """Return False (and log) if robots.txt disallows the target URL."""
+        if not self.config.respect_robots_txt:
             return True
-        domain = "/".join(self.start_url.split("/")[:3])
-        allowed = robots_allowed(domain)
+        url = target_url or self.start_url
+        if not url:
+            return True
+        allowed = robots_allowed(url)
         if not allowed:
-            log.warning("[%s] robots.txt disallows scraping %s — skipping", self.source, domain)
+            log.warning("[%s] robots.txt disallows scraping %s — skipping", self.source, url)
         return allowed
 
     def run_with_retry(self, *args, proxy_pool: ProxyProvider | None = None, **kwargs) -> list[Quote]:
@@ -161,16 +308,21 @@ class BaseScraper(ABC):
             except Exception as exc:  # noqa: BLE001
                 log.warning("[%s] attempt %d failed: %s", self.source, attempt + 1, exc)
                 last = exc
-            time.sleep(self.config.backoff_base ** attempt)
+            if attempt < self.config.max_retries - 1:
+                time.sleep(self.config.backoff_base ** attempt)
         log.error("[%s] all retries exhausted: %s", self.source, last)
         return [self._quote(*args, status="failed", payload={"error": str(last)}, **kwargs)]
 
     def guarded_run(self, *args, proxy_pool: ProxyProvider | None = None, **kwargs) -> list[Quote]:
-        """Kill-switch + robots gate around run_with_retry."""
+        """Kill-switch + path-aware robots gate around run_with_retry."""
         if not self.enabled:
             log.info("[%s] disabled via kill-switch — skipping", self.source)
             return []
-        if not self.check_robots():
+        try:
+            target = self.robots_target(*args, **kwargs)
+        except Exception:
+            target = self.start_url
+        if not self.check_robots(target):
             return [self._quote(*args, status="failed", payload={"error": "robots_disallowed"}, **kwargs)]
         self.polite_wait()
         return self.run_with_retry(*args, proxy_pool=proxy_pool, **kwargs)

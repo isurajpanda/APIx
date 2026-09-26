@@ -26,7 +26,12 @@ def _pick_airport(pg, box_sel: str, field_sel: str, code: str, city: str) -> Non
     Matches on "(DEL" style IATA fragment — robust to city-name spelling
     (Delhi/Bengaluru-vs-Bangalore).
     """
-    pg.evaluate(f"() => document.querySelector('{box_sel}').click()")
+    opened = pg.evaluate(
+        f"() => {{ const el = document.querySelector('{box_sel}');"
+        f" if (el) {{ el.click(); return true; }} return false; }}"
+    )
+    if not opened:
+        raise SelectorNotFound("easemytrip", box_sel)
     pg.wait_for_timeout(1200)
     pg.fill(field_sel, code)
     pg.wait_for_timeout(2500)
@@ -38,6 +43,21 @@ def _pick_airport(pg, box_sel: str, field_sel: str, code: str, city: str) -> Non
     if not clicked:
         raise SelectorNotFound("easemytrip", f"suggestion for {code}")
     pg.wait_for_timeout(800)
+
+
+def resolve_emt_fares(pg) -> tuple[float, int]:
+    """Pick (cheapest, count) from an EMT results page — fare elements only.
+
+    Page-wide ₹ parsing picks up coupon/fee mentions (a 2026-10-04 run returned
+    a suspect Rs 1,662 "fare" with zero price/listing-class matches), so a page
+    with no fare-element hits is reported SoldOut rather than a fake SUCCESS.
+    """
+    from scraper.live import parse_scoped_fares
+
+    scoped = parse_scoped_fares(pg, ["[class*=price i]", "[class*=listing i]"])
+    if scoped:
+        return scoped[0], len(scoped)
+    raise SoldOut("easemytrip: results page but no priced fares in fare elements")
 
 
 def search_easymytrip(origin: str, destination: str, flight_date: date,
@@ -80,21 +100,12 @@ def search_easymytrip(origin: str, destination: str, flight_date: date,
                 visible = (pg.content() or "").lower()
             if any(m in visible for m in BLOCK_MARKERS):
                 raise CaptchaBlocked("easemytrip: bot-mitigation on results page")
-            fares = parse_fares(pg.content())
-            try:
-                from scraper.live import parse_scoped_fares
-                scoped = parse_scoped_fares(pg, ["[class*=price i]", "[class*=listing i]"])
-                if scoped:
-                    fares = scoped
-            except Exception:
-                pass
-            if not fares:
-                raise SoldOut("easemytrip: results page but no priced fares")
+            cheapest, n_seen = resolve_emt_fares(pg)
             return {
-                "total_fare": fares[0], "base_fare": None, "taxes": None,
+                "total_fare": cheapest, "base_fare": None, "taxes": None,
                 "udf": None, "convenience_fee": None, "currency": "INR",
                 "decomposition_available": False, "live": True,
-                "url": pg.url, "n_fares_seen": len(fares),
+                "url": pg.url, "n_fares_seen": n_seen,
             }
         finally:
             browser.close()

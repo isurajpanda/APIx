@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import yaml
@@ -15,11 +16,18 @@ from apscheduler.triggers.cron import CronTrigger
 
 from scraper.base import ScraperConfig
 from scraper.proxies import DbProxyPool, refresh_pool
-from scraper.spiders import ALL_SCRAPERS
+from scraper.spiders import ALL_SCRAPERS, MOCK
 from scraper.store import get_engine, write_raw_quotes
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 
 def load_basket(path: str | None = None) -> dict:
@@ -37,21 +45,52 @@ def run_cycle() -> int:
     """
     basket = load_basket()
     politeness = basket.get("politeness", {})
+    # Politeness delays exist to rate-limit LIVE hits; mock mode touches no
+    # network, so sleeping 2s x 330 runs (~11 min) would be pure waste.
+    delay = 0.0 if MOCK else float(politeness.get("delay_seconds", 2.0))
     cfg = ScraperConfig(
-        delay_seconds=float(politeness.get("delay_seconds", 2.0)),
+        delay_seconds=delay,
         respect_robots_txt=bool(politeness.get("respect_robots_txt", True)),
         enabled_sources=basket.get("enabled_sources", {}),
     )
     pool = DbProxyPool()
     engine = get_engine()
+    routes = basket["routes"]
+    windows = basket["advance_windows"]
+    n_jobs = len(routes) * len(windows) * len(ALL_SCRAPERS)
+    log.info(
+        "scrape cycle starting: %d routes x %d windows x %d sources = %d jobs (mock=%s, delay=%.1fs)",
+        len(routes), len(windows), len(ALL_SCRAPERS), n_jobs, MOCK, delay,
+    )
     total = 0
-    for r in basket["routes"]:
-        for window in basket["advance_windows"]:
+    done = 0
+    t_start = time.monotonic()
+    for r in routes:
+        for window in windows:
             for cls in ALL_SCRAPERS:
                 scraper = cls(cfg)
-                quotes = scraper.guarded_run(r["origin"], r["destination"], window, proxy_pool=pool)
-                total += write_raw_quotes(engine, quotes)
-    log.info("scrape cycle complete: %d quotes", total)
+                label = f"{r['origin']}-{r['destination']} T+{window} [{scraper.source}]"
+                try:
+                    t0 = time.monotonic()
+                    quotes = scraper.guarded_run(r["origin"], r["destination"], window, proxy_pool=pool)
+                    try:
+                        n_written = write_raw_quotes(engine, quotes)
+                    except Exception as exc:  # noqa: BLE001 — keep going on a write failure
+                        log.error("[%s] write to raw_fare_quotes failed: %s", scraper.source, exc)
+                        n_written = 0
+                    total += n_written
+                    done += 1
+                    log.info(
+                        "%s done in %.1fs: %d quotes written (%d/%d jobs, %.0f%%)",
+                        label, time.monotonic() - t0, n_written, done, n_jobs,
+                        100.0 * done / n_jobs,
+                    )
+                except Exception as exc:  # noqa: BLE001 — one bad source must not kill the cycle
+                    done += 1
+                    log.exception("%s scrape crashed, skipping: %s", label, exc)
+    log.info(
+        "scrape cycle complete: %d quotes in %.1fs", total, time.monotonic() - t_start
+    )
     return total
 
 

@@ -1,9 +1,12 @@
 # SCRAPING_ETHICS
 
 - Rate limits: ≥2s delay between requests, 1 concurrent request per domain
-  (`scraper/routes.yaml → politeness`).
-- `robots.txt` checked before every source run (`BaseScraper.check_robots`);
-  disallowed domains are logged and skipped.
+  (`scraper/routes.yaml → politeness`; audit uses 2.0s too).
+- `robots.txt` checked path-aware before every source run
+  (`BaseScraper.check_robots` on the exact search URL, not just the domain
+  root); disallowed paths are logged as `robots_disallowed` and skipped.
+  Ixigo `/search/result/` is disallowed → parked by the gate (no override flag
+  fetches it; `--ignore-robots` only reports the decision).
 - Prefer OTA internal JSON/XHR endpoints over full browser rendering to
   minimize server load.
 - ToS: airline/OTA ToS typically restrict automated collection; this
@@ -16,6 +19,13 @@
   fingerprint minimization, not circumvention.
 - No CAPTCHA solving: sources gating on reCAPTCHA (Ixigo, Air India Express)
   are parked, never bypassed. CAPTCHA → status `captcha_blocked`.
+- Ixigo rule (explicit): no scraping of `/search/result/`, no CAPTCHA solving,
+  no PerimeterX/bot-mitigation bypass, no proxy trick to evade the gate.
+  Compliant path only: official Ixigo affiliate/API via `scraper/ixigo_api.py`
+  (`IXIGO_API_KEY`/`IXIGO_API_URL`). Without credentials the Ixigo quote is
+  recorded as parked `no_data` — never a fabricated fare.
+- Per-provider arrangements: `scraper/form_flows.py` registry (live / scaffold /
+  api_only / parked) + notes in `scraper/routes.yaml`.
 - Kill-switch: set any source to `false` under `enabled_sources` in
   `scraper/routes.yaml` to disable it instantly.
 - CAPTCHA → status `captcha_blocked`, skip without retry-storm; sold-out →
