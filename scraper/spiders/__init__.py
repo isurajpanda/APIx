@@ -1,29 +1,13 @@
 """Source scrapers. Each module = one source (own DOM/anti-bot posture).
 
-Prototype mode: live scraping functions are stubbed behind `MOCK=true` (default),
-returning deterministic synthetic quotes so the full pipeline is demoable even when
-sites block bots. Set MOCK=false to attempt real fetching (Playwright/Scrapy paths).
+All scrapers attempt live fetching via Playwright/Scrapy paths. No mock data.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-import random
 from datetime import datetime, timezone
 
 from scraper.base import BaseScraper, Quote
-
-MOCK = os.environ.get("APIX_SCRAPER_MOCK", "true").lower() == "true"
-
-# Representative base fares (INR) per route for mock generation.
-BASE_FARES = {
-    ("DEL", "BOM"): 5500,
-    ("DEL", "BLR"): 6200,
-    ("BOM", "BLR"): 4200,
-    ("DEL", "CCU"): 5800,
-    ("BLR", "HYD"): 3200,
-    ("MAA", "DEL"): 6400,
-}
 
 CARRIERS = {
     "indigo_direct": "6E",
@@ -40,42 +24,9 @@ CARRIERS = {
 }
 
 
-def mock_quote(source: str, origin: str, destination: str, window: int) -> Quote:
-    """Deterministic mock fare: base + lead-time markup + hash jitter."""
-    base = BASE_FARES.get((origin, destination), 5000)
-    # Lead-time curve: last-minute (T+1) is pricier; T+45 cheapest.
-    markup = {1: 1.45, 7: 1.25, 15: 1.10, 30: 1.0, 45: 0.92}.get(window, 1.0)
-    seed = int(hashlib.md5(f"{source}{origin}{destination}{window}".encode()).hexdigest()[:8], 16)
-    jitter = 0.95 + (seed % 100) / 1000.0  # 0.95–1.05
-    total = round(base * markup * jitter, 2)
-    taxes = round(total * 0.18, 2)
-    payload = {
-        "total_fare": total,
-        "base_fare": round(total - taxes - 300, 2),
-        "taxes": taxes,
-        "udf": 200.0,
-        "convenience_fee": 100.0,
-        "currency": "INR",
-        "mock": True,
-    }
-    return Quote(
-        source=source,
-        origin=origin,
-        destination=destination,
-        carrier=CARRIERS.get(source, "6E"),
-        advance_purchase_window=window,
-        scrape_timestamp=datetime.now(timezone.utc),
-        raw_payload=payload,
-        status="success",
-    )
-
-
 class MockableScraper(BaseScraper):
-    """JS/Scrapy subclass hook: real fetch when MOCK=false, mock otherwise."""
+    """Base for JS/Scrapy scrapers with live fetch paths."""
 
-    # Live-search config (calibrated best-effort; audit reports per-source status).
-    # URL template vars: {o} {d} origin/dest, {dd} {mm} {yyyy} flight date parts,
-    # {yyyymmdd} {ddmmyyyy} compact forms. CONFIDENCE: 'known' vs 'experimental'.
     SEARCH_URL: str = ""
     SELECTORS: list[str] = ["body"]
     CONFIDENCE: str = "experimental"
@@ -88,7 +39,6 @@ class MockableScraper(BaseScraper):
         )
 
     def robots_target(self, origin: str = "", destination: str = "", window: int = 7, **_) -> str:
-        """Exact search URL for the robots check (falls back to homepage)."""
         try:
             from datetime import date, timedelta
             if self.SEARCH_URL and origin and destination:
@@ -98,8 +48,6 @@ class MockableScraper(BaseScraper):
         return self.start_url
 
     def scrape(self, origin: str, destination: str, window: int) -> list[Quote]:
-        if MOCK:
-            return [mock_quote(self.source, origin, destination, window)]
         return self.fetch_live(origin, destination, window)
 
     def fetch_live(self, origin: str, destination: str, window: int) -> list[Quote]:

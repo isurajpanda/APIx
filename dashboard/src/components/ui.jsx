@@ -3,35 +3,38 @@ import { cn } from '../lib/utils.js';
 
 export function Card({ className, children }) {
   return (
-    <div className={cn('rounded-xl border border-border bg-surface shadow-sm', className)}>
+    <div className={cn(
+      'rounded-2xl border border-border bg-background/80 backdrop-blur-xl shadow-2xl',
+      className
+    )}>
       {children}
     </div>
   );
 }
 
 export function CardHeader({ className, children }) {
-  return <div className={cn('flex flex-col space-y-1.5 p-6 pb-3', className)}>{children}</div>;
+  return <div className={cn('flex flex-col space-y-1.5 p-4 pb-3', className)}>{children}</div>;
 }
 
 export function CardTitle({ className, children }) {
-  return <h3 className={cn('text-sm font-medium text-muted', className)}>{children}</h3>;
+  return <h3 className={cn('text-sm font-medium text-muted-foreground', className)}>{children}</h3>;
 }
 
 export function CardContent({ className, children }) {
-  return <div className={cn('p-6 pt-0', className)}>{children}</div>;
+  return <div className={cn('p-4 pt-0', className)}>{children}</div>;
 }
 
 export function Badge({ className, children, tone = 'default' }) {
   const tones = {
-    default: 'bg-zinc-800 text-zinc-200',
-    green: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-    red: 'bg-red-500/15 text-red-400 border-red-500/30',
-    blue: 'bg-[#3291ff]/15 text-[#3291ff] border-[#3291ff]/30',
+    default: 'bg-secondary text-secondary-foreground',
+    green: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    red: 'bg-red-500/10 text-red-400 border-red-500/20',
+    blue: 'bg-accent/10 text-accent border-accent/20',
   };
   return (
     <span
       className={cn(
-        'inline-flex items-center rounded-full border border-transparent px-2.5 py-0.5 text-xs font-medium',
+        'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium',
         tones[tone],
         className,
       )}
@@ -43,14 +46,16 @@ export function Badge({ className, children, tone = 'default' }) {
 
 export function Tabs({ value, onChange, options }) {
   return (
-    <div className="inline-flex h-9 items-center justify-center rounded-lg bg-zinc-900 p-1 text-muted">
+    <div className="inline-flex h-8 items-center justify-center rounded-lg bg-muted p-1">
       {options.map((o) => (
         <button
           key={o}
           onClick={() => onChange(o)}
           className={cn(
-            'inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all',
-            value === o ? 'bg-zinc-800 text-white shadow' : 'hover:text-white',
+            'inline-flex items-center justify-center whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-all',
+            value === o
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground',
           )}
         >
           {o}
@@ -66,7 +71,8 @@ export function Select({ value, onChange, options, className }) {
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className={cn(
-        'h-9 rounded-md border border-border bg-surface px-3 text-sm text-white outline-none focus:border-accent',
+        'h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none',
+        'focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background transition-all',
         className,
       )}
     >
@@ -81,15 +87,17 @@ export function Select({ value, onChange, options, className }) {
 
 export function Stat({ label, value, sub, trend }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{label}</CardTitle>
+    <Card className="group">
+      <CardHeader className="p-3 pb-2">
+        <CardTitle className="text-[10px] uppercase tracking-wider">{label}</CardTitle>
       </CardHeader>
-      <CardContent>
-        <div className="text-3xl font-semibold tracking-tight">{value}</div>
-        {sub && <p className="mt-1 text-xs text-muted">{sub}</p>}
-        {trend && (
-          <Badge tone={trend > 0 ? 'red' : 'green'} className="mt-2">
+      <CardContent className="p-3 pt-0">
+        <div className="text-2xl font-bold tracking-tight text-foreground">
+          {value}
+        </div>
+        {sub && <p className="mt-0.5 text-[10px] text-muted-foreground">{sub}</p>}
+        {trend !== undefined && trend !== null && (
+          <Badge tone={trend > 0 ? 'red' : 'green'} className="mt-1.5">
             {trend > 0 ? '▲' : '▼'} {Math.abs(trend).toFixed(2)}%
           </Badge>
         )}
