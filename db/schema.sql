@@ -42,6 +42,11 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_fare_key ON fares
     (origin, destination, carrier, flight_date, advance_purchase_window, source, scrape_timestamp);
 
+CREATE INDEX IF NOT EXISTS idx_fares_route_date ON fares (origin, destination, scrape_timestamp);
+CREATE INDEX IF NOT EXISTS idx_fares_availability ON fares (availability_status, is_outlier);
+CREATE INDEX IF NOT EXISTS idx_fares_flight_date ON fares (flight_date);
+CREATE INDEX IF NOT EXISTS idx_fares_source ON fares (source);
+
 CREATE TABLE IF NOT EXISTS routes (
     route_id     SERIAL PRIMARY KEY,
     origin       TEXT NOT NULL,
@@ -59,6 +64,9 @@ CREATE TABLE IF NOT EXISTS daily_index (
     computed_at          TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS idx_daily_index_date ON daily_index (index_date);
+CREATE INDEX IF NOT EXISTS idx_daily_index_methodology ON daily_index (methodology_version);
+
 CREATE TABLE IF NOT EXISTS raw_fare_quotes (
     id                       BIGSERIAL PRIMARY KEY,
     source                   TEXT NOT NULL,
@@ -71,6 +79,9 @@ CREATE TABLE IF NOT EXISTS raw_fare_quotes (
     status                   TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_raw_fare_quotes_scrape_timestamp ON raw_fare_quotes (scrape_timestamp);
+CREATE INDEX IF NOT EXISTS idx_raw_fare_quotes_route ON raw_fare_quotes (origin, destination);
+
 -- Free-proxy pool (checked against checkip.amazonaws.com, fastest first)
 CREATE TABLE IF NOT EXISTS proxies (
     endpoint     TEXT PRIMARY KEY, -- e.g. 'socks5://1.2.3.4:1080'
@@ -78,10 +89,14 @@ CREATE TABLE IF NOT EXISTS proxies (
     latency_ms   INTEGER,          -- last successful check latency (NULL = dead)
     working      BOOLEAN DEFAULT FALSE,
     last_checked TIMESTAMPTZ,
-    fail_count   INTEGER DEFAULT 0
+    fail_count   INTEGER DEFAULT 0,
+    cooldown_until TIMESTAMPTZ,
+    success_count INTEGER DEFAULT 0,
+    total_uses   INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_proxies_working_latency ON proxies (working, latency_ms);
+CREATE INDEX IF NOT EXISTS idx_proxies_cooldown ON proxies (cooldown_until);
 
 -- Continuous aggregates (TimescaleDB only; skipped on plain PostgreSQL)
 DO $$

@@ -27,6 +27,8 @@ import struct
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import text
@@ -41,6 +43,8 @@ CHECK_HOST = os.environ.get("PROXY_CHECK_HOST", "checkip.amazonaws.com")
 CHECK_PORT = int(os.environ.get("PROXY_CHECK_PORT", "80"))
 CHECK_TIMEOUT = float(os.environ.get("PROXY_CHECK_TIMEOUT", "8.0"))
 CHECK_WORKERS = int(os.environ.get("PROXY_CHECK_WORKERS", "20"))
+PROXY_COOLDOWN_SECONDS = float(os.environ.get("PROXY_COOLDOWN_SECONDS", "60"))
+PROXY_MAX_FAILURES = int(os.environ.get("PROXY_MAX_FAILURES", "5"))
 
 _VALID = re.compile(r"^(socks4|socks5|https?)://([^:/?#]+):(\d+)$")
 _IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}\s*$")
@@ -52,7 +56,10 @@ CREATE TABLE IF NOT EXISTS proxies (
     latency_ms   INTEGER,
     working      BOOLEAN DEFAULT FALSE,
     last_checked TIMESTAMPTZ,
-    fail_count   INTEGER DEFAULT 0
+    fail_count   INTEGER DEFAULT 0,
+    cooldown_until TIMESTAMPTZ,
+    success_count INTEGER DEFAULT 0,
+    total_uses   INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_proxies_working_latency ON proxies (working, latency_ms);
 """
@@ -264,7 +271,6 @@ def store_results(engine: sa.Engine, results: dict[str, float | None]) -> list[t
                 ),
                 rows,
             )
-        # Prune stale dead entries (unchecked >24h and not working).
         conn.execute(
             text("DELETE FROM proxies WHERE NOT working AND last_checked < now() - INTERVAL '24 hours'")
         )
@@ -300,7 +306,7 @@ def fastest_proxies(engine: sa.Engine, limit: int = 5) -> list[str]:
     """Fastest currently-working proxies, best first."""
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT endpoint FROM proxies WHERE working ORDER BY latency_ms ASC NULLS LAST LIMIT :n"),
+            text("SELECT endpoint FROM proxies WHERE working AND (cooldown_until IS NULL OR cooldown_until < now()) ORDER BY latency_ms ASC NULLS LAST LIMIT :n"),
             {"n": limit},
         ).all()
     return [r[0] for r in rows]
@@ -308,17 +314,28 @@ def fastest_proxies(engine: sa.Engine, limit: int = 5) -> list[str]:
 
 # ------------------------------------------------------------------ pool ---
 
+@dataclass
+class ProxyStats:
+    successes: int = 0
+    failures: int = 0
+    last_used: float = 0.0
+    cooldown_until: float = 0.0
+
+
 class DbProxyPool:
     """Pluggable proxy pool (satisfies scraper.base.ProxyProvider).
 
     Round-robins across the top-N fastest working proxies so failover traffic
-    is spread instead of hammering a single free proxy.
+    is spread instead of hammering a single free proxy. Includes cooldown,
+    performance tracking, and fallback chain.
     """
 
     def __init__(self, database_url: str | None = None, top_n: int = 5):
         self.database_url = database_url
         self.top_n = top_n
         self._cycle = itertools.cycle(range(top_n))
+        self._stats: dict[str, ProxyStats] = {}
+        self._fallback_index = 0
 
     def get_proxy(self) -> str | None:
         """Return next fastest-working proxy, or None if the pool is empty."""
@@ -331,25 +348,71 @@ class DbProxyPool:
         except Exception as exc:
             log.warning("proxy pool unreachable: %s", exc)
             return None
-        if not candidates:
-            return None
-        return candidates[next(self._cycle) % len(candidates)]
 
-    def report_bad(self, proxy_url: str) -> None:
-        """Mark a proxy not-working (call when a request through it fails)."""
+        now = time.monotonic()
+        available = [p for p in candidates if self._stats.get(p, ProxyStats()).cooldown_until <= now]
+
+        if not available:
+            if candidates:
+                log.warning("all proxies in cooldown, using oldest available")
+                available = candidates
+            else:
+                return None
+
+        proxy = available[self._fallback_index % len(available)]
+        self._fallback_index += 1
+
+        if proxy not in self._stats:
+            self._stats[proxy] = ProxyStats()
+        self._stats[proxy].last_used = now
+        self._stats[proxy].successes += 1
+
         try:
             engine = get_engine(self.database_url)
             try:
                 with engine.begin() as conn:
                     conn.execute(
-                        text("UPDATE proxies SET working = FALSE, fail_count = fail_count + 1 "
-                             "WHERE endpoint = :e"),
-                        {"e": proxy_url},
+                        text("UPDATE proxies SET total_uses = total_uses + 1, success_count = success_count + 1 WHERE endpoint = :e"),
+                        {"e": proxy},
+                    )
+            finally:
+                engine.dispose()
+        except Exception:
+            pass
+
+        return proxy
+
+    def report_bad(self, proxy_url: str) -> None:
+        """Mark a proxy not-working (call when a request through it fails)."""
+        now = time.monotonic()
+        if proxy_url not in self._stats:
+            self._stats[proxy_url] = ProxyStats()
+        self._stats[proxy_url].failures += 1
+        self._stats[proxy_url].cooldown_until = now + PROXY_COOLDOWN_SECONDS
+
+        try:
+            engine = get_engine(self.database_url)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("UPDATE proxies SET working = FALSE, fail_count = fail_count + 1, cooldown_until = now() + make_interval(secs => :cooldown) WHERE endpoint = :e"),
+                        {"e": proxy_url, "cooldown": PROXY_COOLDOWN_SECONDS},
                     )
             finally:
                 engine.dispose()
         except Exception as exc:
             log.warning("report_bad failed: %s", exc)
+
+    def get_stats(self) -> dict[str, dict]:
+        """Return performance stats for all tracked proxies."""
+        return {
+            url: {
+                "successes": s.successes,
+                "failures": s.failures,
+                "in_cooldown": s.cooldown_until > time.monotonic(),
+            }
+            for url, s in self._stats.items()
+        }
 
 
 # ------------------------------------------------------------------- cli ---

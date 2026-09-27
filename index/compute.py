@@ -4,8 +4,11 @@ Index(t) = 100 * sum_i weight(i) * avg_fare(i,t) / avg_fare(i, base_period)
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from statistics import mean
+
+logger = logging.getLogger(__name__)
 
 
 def route_average(fares: list[float]) -> float | None:
@@ -66,3 +69,131 @@ def validate_weights(weights: dict[str, float]) -> None:
     """Weights must sum to 1.0 (tolerance 1e-6)."""
     if abs(sum(weights.values()) - 1.0) > 1e-6:
         raise ValueError(f"weights must sum to 1.0, got {sum(weights.values())}")
+
+
+def validate_index_value(value: float | None, date: str) -> list[str]:
+    """Validate a single index value, returning list of validation errors."""
+    errors = []
+    if value is None:
+        errors.append(f"index value is None for {date}")
+    elif value < 0:
+        errors.append(f"negative index value {value} for {date}")
+    elif value > 1000:
+        errors.append(f"suspiciously high index value {value} for {date}")
+    elif value < 1:
+        errors.append(f"suspiciously low index value {value} for {date}")
+    return errors
+
+
+def decompose_index_change(
+    relatives_t: dict[str, float | None],
+    relatives_t1: dict[str, float | None],
+    weights: dict[str, float],
+) -> dict[str, float]:
+    """Decompose index change into per-route contributions.
+
+    Returns {route: contribution} where contribution = weight * (rel_t - rel_t1).
+    """
+    contributions = {}
+    for route in weights:
+        rt = relatives_t.get(route)
+        rt1 = relatives_t1.get(route)
+        if rt is not None and rt1 is not None:
+            contributions[route] = weights[route] * (rt - rt1)
+    return contributions
+
+
+def attribute_index_change(
+    index_t: float,
+    index_t1: float,
+    relatives_t: dict[str, float | None],
+    relatives_t1: dict[str, float | None],
+    weights: dict[str, float],
+) -> dict[str, Any]:
+    """Attribute index change to routes with percentage contributions."""
+    total_change = index_t - index_t1
+    contributions = decompose_index_change(relatives_t, relatives_t1, weights)
+    attribution = {}
+    for route, contrib in contributions.items():
+        pct = (contrib / total_change * 100) if total_change != 0 else 0
+        attribution[route] = {
+            "contribution": round(contrib, 4),
+            "percentage": round(pct, 2),
+        }
+    return {
+        "total_change": round(total_change, 4),
+        "attribution": attribution,
+    }
+
+
+def sensitivity_analysis(
+    relatives: dict[str, float | None],
+    weights: dict[str, float],
+    shock_pct: float = 10.0,
+) -> dict[str, float]:
+    """Compute index impact of a uniform shock to each route.
+
+    Returns {route: index_impact} showing how much the index would change
+    if that route's fares increased by shock_pct.
+    """
+    base_index = laspeyres_index(relatives, weights)
+    if base_index is None:
+        return {}
+    impacts = {}
+    for route in relatives:
+        if relatives[route] is None:
+            continue
+        shocked = dict(relatives)
+        shocked[route] = relatives[route] * (1 + shock_pct / 100)
+        new_index = laspeyres_index(shocked, weights)
+        if new_index is not None:
+            impacts[route] = round(new_index - base_index, 4)
+    return impacts
+
+
+def compute_index_quality_metrics(
+    series: dict[str, float | None],
+    weights: dict[str, float],
+) -> dict[str, Any]:
+    """Compute quality metrics for the index series."""
+    values = [v for v in series.values() if v is not None]
+    if not values:
+        return {"error": "no valid values"}
+    return {
+        "count": len(values),
+        "mean": round(mean(values), 4),
+        "min": round(min(values), 4),
+        "max": round(max(values), 4),
+        "std": round(stdev(values), 4) if len(values) > 1 else 0,
+        "coverage": len(values) / len(series) if series else 0,
+        "weight_count": len(weights),
+    }
+
+
+def check_index_rebalancing_needed(
+    current_weights: dict[str, float],
+    target_weights: dict[str, float],
+    tolerance: float = 0.01,
+) -> bool:
+    """Check if weights need rebalancing (any route differs by more than tolerance)."""
+    for route in set(current_weights) | set(target_weights):
+        current = current_weights.get(route, 0)
+        target = target_weights.get(route, 0)
+        if abs(current - target) > tolerance:
+            return True
+    return False
+
+
+def rebalance_weights(
+    current_weights: dict[str, float],
+    target_weights: dict[str, float],
+    smoothing: float = 0.1,
+) -> dict[str, float]:
+    """Smoothly rebalance weights toward target using exponential smoothing."""
+    new_weights = {}
+    for route in set(current_weights) | set(target_weights):
+        current = current_weights.get(route, 0)
+        target = target_weights.get(route, 0)
+        new_weights[route] = current + smoothing * (target - current)
+    total = sum(new_weights.values())
+    return {k: v / total for k, v in new_weights.items()}

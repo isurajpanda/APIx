@@ -1,7 +1,13 @@
 """FastAPI backend: APIx index, fares, routes, health. Memcached caching."""
 from __future__ import annotations
 
+import logging
 import os
+import re
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 try:
     from dotenv import load_dotenv
@@ -9,19 +15,88 @@ try:
 except ImportError:
     pass
 
-import time
-
-from fastapi import FastAPI, HTTPException, Query
+import sqlalchemy as sa
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("apix")
 
 MEMCACHED_SERVERS = os.environ.get("MEMCACHED_SERVERS", "127.0.0.1:11211")
 CACHE_TTL = int(os.environ.get("APIX_CACHE_TTL", "300"))
+DB_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/apix")
+MAX_DB_RETRIES = 3
+DB_RETRY_DELAY = 0.5
+QUERY_TIMEOUT = 30
+MAX_PAGE_SIZE = 365
+DEFAULT_PAGE_SIZE = 90
 
-app = FastAPI(title="APIx — Airfare Price Index", version="1.0.0",
-              description="Real-time domestic airfare price index for MoSPI/NSO/RBI consumption.")
+_engine = None
+
+
+def _get_engine():
+    global _engine
+    if _engine is None:
+        _engine = sa.create_engine(
+            DB_URL,
+            pool_size=10,
+            max_overflow=20,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+            connect_args={"connect_timeout": 10, "options": f"-c statement_timeout={QUERY_TIMEOUT * 1000}"},
+        )
+    return _engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _get_engine()
+    logger.info("APIx backend starting up")
+    yield
+    if _engine:
+        _engine.dispose()
+    logger.info("APIx backend shutting down")
+
+
+app = FastAPI(
+    title="APIx — Airfare Price Index",
+    version="1.0.0",
+    description="Real-time domestic airfare price index for MoSPI/NSO/RBI consumption.",
+    lifespan=lifespan,
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = str(uuid.uuid4())[:8]
+    request.state.request_id = request_id
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed = time.monotonic() - start
+    response.headers["X-Request-ID"] = request_id
+    logger.info("%s %s %d %.3fms", request.method, request.url.path, response.status_code, elapsed * 1000)
+    return response
+
 
 _memc = None
 _memc_failed = False
@@ -40,6 +115,8 @@ def _memc_client():
             _memc = None
             _memc_failed = True
     return _memc
+
+
 _fallback: dict[str, tuple[float, object]] = {}
 
 
@@ -68,6 +145,10 @@ def cache_set(key: str, value) -> None:
         except Exception:
             pass
     _fallback[key] = (time.time(), value)
+
+
+def _sanitize_cache_key(key: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9:_\-.]", "_", key)
 
 
 class IndexPoint(BaseModel):
@@ -143,17 +224,37 @@ AIRPORTS = [
     {"code": "RUP", "city": "Rupnagar", "name": "Rupnagar Airport", "lat": 30.9660, "lon": 76.5330},
 ]
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_date(date_str: str | None, param_name: str) -> None:
+    if date_str is not None and not _DATE_RE.match(date_str):
+        raise HTTPException(400, f"Invalid {param_name} format. Expected YYYY-MM-DD, got: {date_str}")
+
 
 def _db_rows(query: str, params: dict):
-    import sqlalchemy as sa
     from sqlalchemy import text
-    eng = sa.create_engine(os.environ.get("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/apix"))
-    with eng.connect() as c:
-        return [dict(r._mapping) for r in c.execute(text(query), params)]
+    eng = _get_engine()
+    last_exc = None
+    for attempt in range(MAX_DB_RETRIES):
+        try:
+            with eng.connect() as c:
+                return [dict(r._mapping) for r in c.execute(text(query), params)]
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("DB query failed (attempt %d/%d): %s", attempt + 1, MAX_DB_RETRIES, str(exc)[:200])
+            if attempt < MAX_DB_RETRIES - 1:
+                time.sleep(DB_RETRY_DELAY * (2 ** attempt))
+    logger.error("DB query failed after %d attempts: %s", MAX_DB_RETRIES, str(last_exc)[:200])
+    raise HTTPException(503, "Database unavailable")
 
 
-def get_index_series(granularity: str, start: str | None, end: str | None) -> list[dict]:
-    key = f"index:{granularity}:{start}:{end}"
+def get_index_series(granularity: str, start: str | None, end: str | None, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> dict:
+    _validate_date(start, "start")
+    _validate_date(end, "end")
+    page_size = min(max(1, page_size), MAX_PAGE_SIZE)
+    offset = (page - 1) * page_size
+    key = _sanitize_cache_key(f"index:{granularity}:{start}:{end}:{page}:{page_size}")
     hit = cache_get(key)
     if hit is not None:
         return hit
@@ -175,42 +276,92 @@ def get_index_series(granularity: str, start: str | None, end: str | None) -> li
             vals = [{"index_date": d, "index_value": round(v, 2),
                      "methodology_version": meta[d][0], "base_period": meta[d][1]}
                     for d, v in daily.items() if v is not None]
-            cache_set(key, vals)
-            return vals
-    except Exception:
+            total = len(vals)
+            paginated = vals[offset:offset + page_size]
+            result = {
+                "granularity": granularity,
+                "series": paginated,
+                "pagination": {"page": page, "page_size": page_size, "total": total, "total_pages": (total + page_size - 1) // page_size},
+            }
+            cache_set(key, result)
+            return result
+    except HTTPException:
         pass
-    return []
+    except Exception as exc:
+        logger.error("Error computing index series: %s", str(exc)[:200])
+    return {"granularity": granularity, "series": [], "pagination": {"page": page, "page_size": page_size, "total": 0, "total_pages": 0}}
 
 
 @app.get("/api/v1/health")
 def health():
+    db_status = "unreachable"
+    last_scrape = None
     try:
         rows = _db_rows("SELECT MAX(scrape_timestamp) AS last_scrape FROM raw_fare_quotes", {})
-        return {"status": "ok", "db": "connected", "last_scrape": str(rows[0]["last_scrape"])}
+        db_status = "connected"
+        last_scrape = str(rows[0]["last_scrape"]) if rows and rows[0]["last_scrape"] else None
+    except HTTPException:
+        db_status = "unreachable"
     except Exception as exc:
-        return {"status": "degraded", "db": "unreachable", "detail": str(exc)[:200], "last_scrape": None}
+        logger.error("Health check DB error: %s", str(exc)[:200])
+        db_status = "unreachable"
+
+    cache_status = "unavailable"
+    mc = _memc_client()
+    if mc is not None:
+        try:
+            mc.get(b"__health__")
+            cache_status = "connected"
+        except Exception:
+            cache_status = "unavailable"
+
+    return {
+        "status": "ok" if db_status == "connected" else "degraded",
+        "db": db_status,
+        "cache": cache_status,
+        "last_scrape": last_scrape,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @app.get("/api/v1/index/daily")
-def daily(start: str | None = Query(default=None), end: str | None = Query(default=None)):
-    return {"granularity": "daily", "series": get_index_series("daily", start, end)}
+def daily(
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+):
+    return get_index_series("daily", start, end, page, page_size)
 
 
 @app.get("/api/v1/index/weekly")
-def weekly(start: str | None = Query(default=None), end: str | None = Query(default=None)):
-    return {"granularity": "weekly", "series": get_index_series("weekly", start, end)}
+def weekly(
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+):
+    return get_index_series("weekly", start, end, page, page_size)
 
 
 @app.get("/api/v1/index/monthly")
-def monthly(start: str | None = Query(default=None), end: str | None = Query(default=None)):
-    return {"granularity": "monthly", "series": get_index_series("monthly", start, end)}
+def monthly(
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+):
+    return get_index_series("monthly", start, end, page, page_size)
 
 
 @app.get("/api/v1/routes")
 def routes():
     try:
         return {"routes": _db_rows("SELECT route_id, origin, destination, weight FROM routes WHERE active ORDER BY 1", {})}
-    except Exception:
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching routes: %s", str(exc)[:200])
         return {"routes": [], "source": "error"}
 
 
@@ -221,7 +372,7 @@ def airports():
 
 @app.get("/api/v1/fares/route")
 def route_fare(origin: str = Query(...), destination: str = Query(...)):
-    key = f"route_fare:{origin}:{destination}"
+    key = _sanitize_cache_key(f"route_fare:{origin}:{destination}")
     hit = cache_get(key)
     if hit is not None:
         return hit
@@ -244,8 +395,10 @@ def route_fare(origin: str = Query(...), destination: str = Query(...)):
             }
             cache_set(key, result)
             return result
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching route fare: %s", str(exc)[:200])
     return {"origin": origin, "destination": destination, "avg_fare": None, "observations": 0, "source": "no_data"}
 
 
@@ -276,8 +429,10 @@ def heatmap():
                       if r["base_fare"] else 1.0} for r in rows]
             cache_set(key, cells)
             return {"heatmap": cells, "source": "db"}
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching heatmap: %s", str(exc)[:200])
     return {"heatmap": [], "source": "no_data"}
 
 
@@ -302,8 +457,8 @@ def elasticity(route_id: int):
                               for r in rows]}
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Error fetching elasticity: %s", str(exc)[:200])
     return {"route_id": route_id, "curve": [], "source": "no_data"}
 
 
@@ -333,8 +488,10 @@ def fare_sources(origin: str = Query(...), destination: str = Query(...)):
                 } for r in rows],
                 "source": "db",
             }
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching fare sources: %s", str(exc)[:200])
     return {"origin": origin, "destination": destination, "sources": [], "source": "no_data"}
 
 
@@ -363,15 +520,15 @@ def fares_by_date(origin: str = Query(...), destination: str = Query(...)):
                 } for r in rows],
                 "source": "db",
             }
-    except Exception:
-        pass
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Error fetching fares by date: %s", str(exc)[:200])
     return {"origin": origin, "destination": destination, "dates": [], "source": "no_data"}
 
 
-@app.api_route("/api/v1/refresh", methods=["GET", "POST"])
+@app.post("/api/v1/refresh")
 def refresh_data():
-    from datetime import datetime, timezone
-
     logs = []
     now = datetime.now(timezone.utc).isoformat()
 
@@ -415,6 +572,27 @@ def refresh_data():
     logs.append({"ts": now, "level": "INFO", "msg": "Refresh complete"})
 
     return {"status": "ok", "refreshed_at": now, "logs": logs}
+
+
+@app.get("/api/v1/metrics")
+def metrics():
+    """Basic operational metrics."""
+    try:
+        fares_count = _db_rows("SELECT COUNT(*) AS cnt FROM fares", {})[0]["cnt"]
+        index_count = _db_rows("SELECT COUNT(*) AS cnt FROM daily_index", {})[0]["cnt"]
+        routes_count = _db_rows("SELECT COUNT(*) AS cnt FROM routes WHERE active", {})[0]["cnt"]
+        raw_count = _db_rows("SELECT COUNT(*) AS cnt FROM raw_fare_quotes", {})[0]["cnt"]
+        return {
+            "fares": fares_count,
+            "index_days": index_count,
+            "active_routes": routes_count,
+            "raw_quotes": raw_count,
+            "cache_fallback_size": len(_fallback),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error("Error fetching metrics: %s", str(exc)[:200])
+        return {"error": str(exc)[:200]}
 
 
 _DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dashboard", "dist")

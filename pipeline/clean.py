@@ -8,11 +8,15 @@ Policy summary:
 """
 from __future__ import annotations
 
+import logging
 from statistics import mean, stdev
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 FLOOR_PRICE = 500.0  # INR sanity floor: no genuine domestic fare is below this.
 OUTLIER_SIGMA = 3.0
+DATA_RETENTION_DAYS = 365  # Keep raw data for 1 year
 
 
 def is_outlier(price: float, history: list[float]) -> bool:
@@ -93,16 +97,39 @@ def deduplicate(records: list[dict[str, Any]]) -> tuple[list[dict], int]:
         latest[key] = rec
     discarded = len(records) - len(latest)
     if discarded:
-        import logging
-        logging.getLogger(__name__).info("deduplicated %d rows", discarded)
+        logger.info("deduplicated %d rows", discarded)
     return list(latest.values()), discarded
+
+
+def validate_record(record: dict[str, Any]) -> list[str]:
+    """Validate a single record, returning list of validation errors."""
+    errors = []
+    required = ["origin", "destination", "source", "scrape_timestamp"]
+    for field in required:
+        if not record.get(field):
+            errors.append(f"missing required field: {field}")
+    if record.get("total_fare") is not None:
+        try:
+            fare = float(record["total_fare"])
+            if fare < 0:
+                errors.append(f"negative fare: {fare}")
+            if fare > 1000000:
+                errors.append(f"suspiciously high fare: {fare}")
+        except (ValueError, TypeError):
+            errors.append(f"invalid fare value: {record.get('total_fare')}")
+    return errors
 
 
 def clean_batch(raw_rows: list[dict[str, Any]], history_by_key: dict[str, list[float]] | None = None) -> dict[str, Any]:
     """Full batch: decompose -> dedup -> outlier-flag -> availability split."""
     history_by_key = history_by_key or {}
     enriched = []
+    validation_errors = []
     for row in raw_rows:
+        errors = validate_record(row)
+        if errors:
+            validation_errors.extend(errors)
+            continue
         parts = decompose_fare(row.get("raw_payload", {}))
         status = row.get("status", "success")
         avail = "available" if status == "success" else ("sold_out" if status == "sold_out" else "no_data")
@@ -115,4 +142,33 @@ def clean_batch(raw_rows: list[dict[str, Any]], history_by_key: dict[str, list[f
         "priced": priced,
         "availability": availability,
         "n_discarded": n_discarded,
+        "validation_errors": validation_errors,
+        "data_quality": {
+            "total_input": len(raw_rows),
+            "valid_records": len(enriched),
+            "invalid_records": len(raw_rows) - len(enriched),
+            "outliers_flagged": sum(1 for r in flagged if r.get("is_outlier")),
+            "priced_records": len(priced),
+            "dedup_discarded": n_discarded,
+        },
+    }
+
+
+def get_data_quality_metrics(batches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate data quality metrics across multiple batches."""
+    total_input = sum(b["data_quality"]["total_input"] for b in batches)
+    total_valid = sum(b["data_quality"]["valid_records"] for b in batches)
+    total_invalid = sum(b["data_quality"]["invalid_records"] for b in batches)
+    total_outliers = sum(b["data_quality"]["outliers_flagged"] for b in batches)
+    total_priced = sum(b["data_quality"]["priced_records"] for b in batches)
+
+    return {
+        "total_input": total_input,
+        "total_valid": total_valid,
+        "total_invalid": total_invalid,
+        "total_outliers": total_outliers,
+        "total_priced": total_priced,
+        "validity_rate": total_valid / total_input if total_input else 0,
+        "outlier_rate": total_outliers / total_valid if total_valid else 0,
+        "pricing_rate": total_priced / total_valid if total_valid else 0,
     }

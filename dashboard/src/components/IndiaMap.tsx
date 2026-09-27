@@ -8,7 +8,7 @@ const INDIA_CENTER: [number, number] = [22.5, 80.5];
 const INDIA_ZOOM = 5;
 
 const CARTO_API_KEY = 'cb1_4058_1_761f67dc62084a89816ae61b';
-const INDIA_GEOJSON_URL = 'https://raw.githubusercontent.com/geohacker/india/master/india.geojson';
+const INDIA_GEOJSON_URL = 'https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries/IND.geojson';
 
 interface IndiaMapProps {
   airports: Airport[];
@@ -87,6 +87,78 @@ function IndiaBorders() {
   if (!geojson) return null;
 
   return <GeoJSON data={geojson} style={style} />;
+}
+
+function MapLegend() {
+  return (
+    <div className="absolute bottom-4 left-4 z-[1000] bg-background/90 backdrop-blur-xl rounded-lg border border-border p-3 text-[10px]">
+      <div className="font-semibold text-foreground mb-2">Legend</div>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full bg-[#dc2626] border border-[#52525b]"></span>
+          <span className="text-muted">Airport</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full bg-[#3291ff] border border-white"></span>
+          <span className="text-muted">Selected</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-3 rounded-full bg-[#ef4444] border border-[#e4e4e7]"></span>
+          <span className="text-muted">Hovered</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="h-0.5 w-4 bg-[#3291ff]"></span>
+          <span className="text-muted">Route</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MapSearch({ airports, onSelect }: { airports: Airport[]; onSelect: (code: string) => void }) {
+  const [query, setQuery] = useState('');
+  const [isOpen, setIsOpen] = useState(false);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return [];
+    const q = query.toLowerCase();
+    return airports.filter(a =>
+      a.code.toLowerCase().includes(q) ||
+      a.city.toLowerCase().includes(q) ||
+      a.name.toLowerCase().includes(q)
+    ).slice(0, 5);
+  }, [query, airports]);
+
+  return (
+    <div className="absolute top-4 right-4 z-[1000]">
+      <div className="relative">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => { setQuery(e.target.value); setIsOpen(true); }}
+          onFocus={() => setIsOpen(true)}
+          onBlur={() => setTimeout(() => setIsOpen(false), 200)}
+          placeholder="Search airports..."
+          className="h-8 w-48 rounded-lg border border-input bg-background/90 backdrop-blur-xl px-3 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring"
+          aria-label="Search airports"
+        />
+        {isOpen && filtered.length > 0 && (
+          <div className="absolute top-full mt-1 w-full bg-background/95 backdrop-blur-xl rounded-lg border border-border overflow-hidden">
+            {filtered.map(a => (
+              <button
+                key={a.code}
+                onClick={() => { onSelect(a.code); setQuery(''); setIsOpen(false); }}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-accent/10 transition-colors"
+              >
+                <span className="font-mono font-semibold text-foreground">{a.code}</span>
+                <span className="text-muted ml-2">{a.city}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function IndiaMap({ airports, selectedOrigin, selectedDestination, onSelectOrigin, onSelectDestination, routeFare }: IndiaMapProps) {
@@ -171,6 +243,15 @@ export default function IndiaMap({ airports, selectedOrigin, selectedDestination
           );
         })}
       </MapContainer>
+
+      <MapLegend />
+      <MapSearch airports={airports} onSelect={(code) => {
+        if (!selectedOrigin || (selectedOrigin && selectedDestination)) {
+          onSelectOrigin(code);
+        } else {
+          onSelectDestination(code);
+        }
+      }} />
 
       {routeFare && routeFare.avg_fare && (
         <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[1000]">
