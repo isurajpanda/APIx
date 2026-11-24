@@ -1,46 +1,49 @@
-# APIx — Real-time Airfare Price Index (MoSPI prototype)
+# APIx | Airfare Price Index
 
-End-to-end system tracking Indian domestic airfares and computing a daily
-Laspeyres-style price index that could augment CPI. Docs: `METHODOLOGY.md`
-(index theory), `SCRAPING_ETHICS.md` (scraping rules), `backtest_report.md`
-(validation), `API.md` (endpoints), `LIVE_STATUS.md` (per-platform audit),
-`SCRAPE_CHECKLIST.md` (working-site checklist), `WINDOWS.md` (Windows setup),
-`HANDOFF.md` (operator handoff).
+**Data engineering and statistical price-index prototype for Indian domestic airfares.**
+
+APIx collects fare observations, normalizes them and computes a daily Laspeyres-style index for analysis. This is a MoSPI-oriented prototype, not an official CPI product.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  A[Airlines and fare sources] --> B[Scheduled collection]
+  B --> C[Raw observations]
+  C --> D[Cleaning pipeline]
+  D --> E[(PostgreSQL / TimescaleDB)]
+  E --> F[Index computation]
+  F --> G[FastAPI and cache]
+  G --> H[React dashboard]
 ```
-airlines/OTAs --> [scraper (Playwright live + mock) + APScheduler] --> raw_fare_quotes
-                                                                     (proxies table: 40x failover pool)
-raw_fare_quotes --> [pipeline/clean.py] --> fares (TimescaleDB hypertable, plain-PG fallback)
-fares --> [index/compute.py] --> daily_index --> [FastAPI + Memcached] --> [React dashboard at /]
-```
 
-Live status: EaseMyTrip genuinely live (form-driven); 1/11 platforms from a
-datacenter IP — see `LIVE_STATUS.md`. DB holds a 45-day backfill + 3 live quotes.
+**Stack:** Python · FastAPI · PostgreSQL · TimescaleDB · Memcached · Playwright · React
 
-## Scrape checklist — working sites right now
+## Project structure
 
-Full live audit 2026-10-04, DEL-BOM T+7, 11/11 sources (full table + operator
-boxes in `SCRAPE_CHECKLIST.md` — score: 4 SUCCESS, 2 content-blocked, 5 parked,
-0 crashes):
+| Directory | Purpose |
+|---|---|
+| `scraper/` | Collection and scheduling |
+| `pipeline/` | Data cleaning |
+| `db/` | Schema and seed data |
+| `index/` | Statistical index computation |
+| `backend/` | API and caching |
+| `dashboard/` | User interface |
+| `tests/` | Automated tests |
 
-- [x] **EaseMyTrip** — WORKING (guarded vs fee-text; genuine fares in DB)
-- [x] **Akasa Air** — WORKING (Rs 3,500, confirmed twice)
-- [x] **SpiceJet** — WORKING (Rs 3,000, 15 fares)
-- [x] **Cleartrip** — PROVISIONAL (Rs 3,500, n=3 — needs one confirmation run)
-- [ ] **Air India** — blocked: form submits (OneTrust/combobox fixes), results carry no priced fares → official API needed
-- [ ] **IndiGo** — blocked: flaky bot-gating (renders on stock Chromium, not real Chrome) → NDC/API recommended
-- [ ] **Yatra** — PARKED (Diya-AI redesign; XHR challenged, never fetched) → needs `YATRA_API_KEY`
-- [ ] **Ixigo** — PARKED (robots `/search/result/` + reCAPTCHA, no backdoor) → needs `IXIGO_API_KEY`
-- [ ] **Goibibo** — PARKED (search path disallowed) → needs `GOIBIBO_API_KEY`
-- [ ] **MakeMyTrip** — PARKED (TLS-resets automation) → needs `MMT_API_KEY`
-- [ ] **Air India Express** — PARKED (reCAPTCHA Enterprise) → needs `AIX_API_KEY`, never solve CAPTCHA
+## Documentation
 
-Verify with: `APIX_SCRAPER_MOCK=false python -m scraper.audit DEL BOM --window 7`
-(no global channel env — Air India self-selects real Chrome)
+- [Methodology](METHODOLOGY.md) and [backtesting](backtest_report.md)
+- [API reference](API.md)
+- [Live source status](LIVE_STATUS.md) and [collection checklist](SCRAPE_CHECKLIST.md)
+- [Collection ethics](SCRAPING_ETHICS.md)
+- [Windows setup](WINDOWS.md) and [operator handoff](HANDOFF.md)
 
-## Native setup (no Docker, Ubuntu)
+## Data and limitations
+
+The repository supports mock and live collection. Source availability varies, and historical backfills must not be confused with verified live observations. Consult the dated source audit before interpreting results. Use authorized data sources and respect access restrictions.
+
+## Quickstart (Ubuntu, native setup)
 
 ```bash
 # 1. System: PostgreSQL + TimescaleDB + Memcached
@@ -65,7 +68,7 @@ python -m scraper.scheduler          # daily scrape + 3-hourly proxy refresh
 python -m scraper.audit DEL BOM --window 7 [--with-proxies]  # live audit
 cd dashboard && npm install && npm run build   # rebuild after frontend changes
 
-# 5. Tests (42 passing)
+# 5. Run tests
 pytest -q
 ```
 
